@@ -87,8 +87,14 @@ export async function viewCalendar(options: { date?: string; user?: string | boo
       console.error(chalk.yellow('\n⚠️  Access denied to this user\'s calendar'));
       console.error(chalk.gray('You may need additional permissions to view this calendar.'));
       console.error(chalk.gray('Try asking the user to share their calendar with you.'));
+    } else if (error.message?.includes('is not installed')) {
+      console.error(chalk.red('\n❌ ' + error.message));
     } else {
-      console.error(chalk.red('Failed to fetch calendar events:'), error.message || error);
+      console.error(chalk.red('\n❌ Failed to fetch calendar events:'), error.message || error);
+      if (process.env.DEBUG || process.env.OUTLOOK_AGENT_DEBUG) {
+        console.error(chalk.gray('\nStack trace:'));
+        console.error(chalk.gray(error.stack));
+      }
     }
     process.exit(1);
   }

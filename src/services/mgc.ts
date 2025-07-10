@@ -1,44 +1,140 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { CalendarEvent } from '../types/calendar.js';
+import chalk from 'chalk';
 
 const execAsync = promisify(exec);
 
 export class MgcService {
+  private mgcChecked = false;
+  private mgcAvailable = false;
+
+  private async checkMgcInstalled(): Promise<boolean> {
+    if (this.mgcChecked) {
+      return this.mgcAvailable;
+    }
+
+    try {
+      await execAsync('command -v mgc');
+      this.mgcAvailable = true;
+    } catch {
+      this.mgcAvailable = false;
+    }
+    this.mgcChecked = true;
+    return this.mgcAvailable;
+  }
+
   async executeCommand(command: string): Promise<any> {
     try {
-      // デバッグ用にコマンドを出力（一時的）
-      if (process.env.DEBUG) {
-        console.log('\nExecuting:', command.substring(0, 200) + (command.length > 200 ? '...' : ''));
+      // mgcコマンドの存在確認
+      if (!await this.checkMgcInstalled()) {
+        throw new Error(
+          'Microsoft Graph CLI (mgc) is not installed.\n' +
+          'Please install it first: https://github.com/microsoftgraph/msgraph-cli\n' +
+          'Installation: brew install mgc (macOS) or see documentation for other platforms'
+        );
+      }
+
+      // デバッグ用にコマンドを出力
+      if (process.env.DEBUG || process.env.OUTLOOK_AGENT_DEBUG) {
+        console.log(chalk.gray('\nExecuting:'), chalk.cyan(command.substring(0, 200) + (command.length > 200 ? '...' : '')));
       }
       
       const { stdout, stderr } = await execAsync(command, {
         maxBuffer: 10 * 1024 * 1024 // 10MB
       });
+      
+      // stderrの処理を改善
       if (stderr) {
-        console.error('MGC stderr:', stderr);
+        const isWarning = stderr.toLowerCase().includes('warning') || 
+                         stderr.toLowerCase().includes('deprecated');
+        const isError = stderr.toLowerCase().includes('error') || 
+                       stderr.toLowerCase().includes('failed') ||
+                       stderr.toLowerCase().includes('unauthorized') ||
+                       stderr.toLowerCase().includes('forbidden');
+        
+        if (isError) {
+          // エラーの場合は例外として投げる
+          throw new Error(`MGC command error: ${stderr}`);
+        } else if (isWarning) {
+          // 警告の場合はデバッグモードでのみ表示
+          if (process.env.DEBUG || process.env.OUTLOOK_AGENT_DEBUG) {
+            console.warn(chalk.yellow('⚠️  MGC warning:'), stderr);
+          }
+        } else {
+          // その他の場合も念のため表示
+          console.error(chalk.yellow('MGC stderr:'), stderr);
+        }
       }
       // キャンセルAPIは "Success" を返すことがある
       if (stdout.trim() === 'Success') {
         return { success: true };
       }
       
-      const result = JSON.parse(stdout);
+      // JSON解析を試みる
+      let result;
+      try {
+        result = JSON.parse(stdout);
+      } catch (parseError) {
+        // JSON解析に失敗した場合、stdout全体をエラーメッセージとして扱う
+        if (stdout.toLowerCase().includes('error') || 
+            stdout.toLowerCase().includes('failed')) {
+          throw new Error(`MGC command returned error: ${stdout}`);
+        }
+        // 解析できないが正常な応答の可能性もある
+        throw new Error(`Failed to parse MGC response: ${stdout.substring(0, 500)}`);
+      }
+
+      // APIエラーのチェック
       if (result.error) {
-        throw new Error(`API Error: ${result.error.code} - ${result.error.message}`);
+        const errorDetails = [
+          `Code: ${result.error.code}`,
+          `Message: ${result.error.message}`
+        ];
+        if (result.error.innerError) {
+          errorDetails.push(`Inner Error: ${JSON.stringify(result.error.innerError)}`);
+        }
+        throw new Error(`Microsoft Graph API Error\n${errorDetails.join('\n')}`);
       }
       
       // デバッグ: 結果を出力
-      if (process.env.DEBUG) {
-        console.log('Result:', JSON.stringify(result, null, 2));
+      if (process.env.DEBUG || process.env.OUTLOOK_AGENT_DEBUG) {
+        console.log(chalk.gray('Result:'), JSON.stringify(result, null, 2));
       }
       
       return result;
     } catch (error: any) {
-      if (error.message?.includes('API Error:')) {
-        throw error;
+      // エラーの詳細情報を保持
+      const enhancedError = new Error(
+        error.message?.includes('API Error:') || 
+        error.message?.includes('Microsoft Graph API Error') ||
+        error.message?.includes('MGC command error:') ||
+        error.message?.includes('is not installed') ?
+          error.message : 
+          `MGC command failed: ${error.message || error}`
+      );
+      
+      // 元のエラー情報を保持
+      if (error.stack) {
+        enhancedError.stack = error.stack;
       }
-      throw new Error(`MGC command failed: ${error.message || error}`);
+      if (error.cause) {
+        enhancedError.cause = error.cause;
+      }
+      
+      // デバッグモードで詳細情報を表示
+      if (process.env.DEBUG || process.env.OUTLOOK_AGENT_DEBUG) {
+        console.error(chalk.red('\nError details:'));
+        console.error(chalk.gray('Message:'), error.message);
+        if (error.code) {
+          console.error(chalk.gray('Code:'), error.code);
+        }
+        if (error.stack && error.stack !== enhancedError.stack) {
+          console.error(chalk.gray('Original stack:'), error.stack);
+        }
+      }
+      
+      throw enhancedError;
     }
   }
 
@@ -66,9 +162,19 @@ export class MgcService {
 
   async checkAuth(): Promise<boolean> {
     try {
+      // mgcコマンドの存在確認を先に行う
+      if (!await this.checkMgcInstalled()) {
+        return false;
+      }
+      
       await execAsync('mgc me get --select id');
       return true;
-    } catch {
+    } catch (error: any) {
+      // デバッグモードでエラー詳細を表示
+      if (process.env.DEBUG || process.env.OUTLOOK_AGENT_DEBUG) {
+        console.error(chalk.gray('\nAuth check failed:'));
+        console.error(chalk.gray(error.message));
+      }
       return false;
     }
   }

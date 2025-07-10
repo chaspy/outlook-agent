@@ -790,8 +790,14 @@ export async function createEvent(options: {
       console.error(chalk.gray('You may need additional permissions (Calendars.ReadWrite).'));
       console.error(chalk.gray('\nTry logging in with write permissions:'));
       console.error(chalk.cyan('npx outlook-agent login'));
+    } else if (error.message?.includes('is not installed')) {
+      console.error(chalk.red('\n❌ ' + error.message));
     } else {
-      console.error(chalk.red('Failed to create event:'), error.message || error);
+      console.error(chalk.red('\n❌ Failed to create event:'), error.message || error);
+      if (process.env.DEBUG || process.env.OUTLOOK_AGENT_DEBUG) {
+        console.error(chalk.gray('\nStack trace:'));
+        console.error(chalk.gray(error.stack));
+      }
     }
     process.exit(1);
   }
